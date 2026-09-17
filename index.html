@@ -416,9 +416,11 @@
         .mt-ebook-list { max-width:900px; margin:0 auto; }
         .mt-ebook-list-toolbar { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:0 auto 10px; max-width:900px; padding:8px 10px; border:1px solid #e2e8f0; border-radius:9px; background:#f8fafc; flex-wrap:wrap; }
         .mt-ebook-list-toolbar-left, .mt-ebook-list-toolbar-right { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-        .mt-ebook-select-all-btn, .mt-ebook-delete-selected-btn { min-height:28px; padding:5px 9px; font-size:10px; }
+        .mt-ebook-select-all-btn, .mt-ebook-delete-selected-btn, .mt-ebook-pass-selected-btn { min-height:28px; padding:5px 9px; font-size:10px; }
         .mt-ebook-delete-selected-btn { background:#dc2626; color:#fff; border:1px solid #dc2626; }
         .mt-ebook-delete-selected-btn:hover:not(:disabled) { background:#b91c1c; border-color:#b91c1c; }
+        .mt-ebook-pass-selected-btn { background:#16a34a; color:#fff; border:1px solid #16a34a; }
+        .mt-ebook-pass-selected-btn:hover:not(:disabled) { background:#15803d; border-color:#15803d; }
         .mt-ebook-selection-count { font-size:10px; font-weight:700; color:#64748b; }
         .mt-ebook-item-select { width:15px; height:15px; margin:2px 8px 0 0; flex:0 0 auto; cursor:pointer; vertical-align:top; }
         .mt-ebook-item-inner { display:flex; align-items:flex-start; min-width:0; flex:1; }
@@ -3877,6 +3879,7 @@ body:has(#boardTab.active) #mtEbookModalBackdrop { display:none !important; }
                 </div>
                 <div class="mt-ebook-list-toolbar-right">
                     <button id="mtEbookDeleteSelectedBtn" type="button" class="mt-ebook-delete-selected-btn" disabled>선택 삭제</button>
+                    <button id="mtEbookPassSelectedBtn" type="button" class="mt-ebook-pass-selected-btn" disabled>선택 통과</button>
                 </div>
             </div>
             <div id="mtEbookList" class="mt-ebook-list"></div>
@@ -8784,11 +8787,13 @@ ${JSON.stringify(finalPayload)}`;
         const toolbar=document.getElementById('mtEbookListToolbar');
         const countEl=document.getElementById('mtEbookSelectionCount');
         const deleteBtn=document.getElementById('mtEbookDeleteSelectedBtn');
+        const passBtn=document.getElementById('mtEbookPassSelectedBtn');
         const selectBtn=document.getElementById('mtEbookSelectPageBtn');
         if(toolbar) toolbar.style.display = pageWords.length ? 'flex' : 'none';
         const selectedCount=mtEbookSelectedIndexes.size;
         if(countEl) countEl.textContent=`선택 ${selectedCount}개`;
         if(deleteBtn){ deleteBtn.disabled=selectedCount===0; deleteBtn.textContent=selectedCount ? `선택 삭제 (${selectedCount})` : '선택 삭제'; }
+        if(passBtn){ passBtn.disabled=selectedCount===0; passBtn.textContent=selectedCount ? `선택 통과 (${selectedCount})` : '선택 통과'; }
         if(selectBtn){
             const pageIndexes=pageWords.map((_,i)=>start+i);
             const allSelected=pageIndexes.length>0 && pageIndexes.every(i=>mtEbookSelectedIndexes.has(i));
@@ -8803,6 +8808,62 @@ ${JSON.stringify(finalPayload)}`;
         mtOpenEbookViewer(slotIndex, true);
     }
 
+    function mtEbookPassSelected(slotIndex){
+        const slot=Number(slotIndex);
+        const type=mtGetSlotType(slot);
+        const words=type==='ebook' ? mtGetEbookWords(slot) : mtGetGeneratorWords(slot);
+        const indexes=Array.from(mtEbookSelectedIndexes).map(Number).filter(Number.isInteger).sort((a,b)=>a-b);
+        if(!indexes.length) return;
+        const selected=indexes.map(i=>({displayIndex:i,word:words[i]})).filter(x=>x.word);
+        if(!selected.length){ mtEbookSelectedIndexes.clear(); mtOpenEbookViewer(slot,true); return; }
+
+        let newlyPassed=0;
+
+        if(type==='ebook') {
+            selected.forEach(({displayIndex,word})=>{
+                const originalIndex=Number.isInteger(Number(word.originalIndex)) ? Number(word.originalIndex) : displayIndex;
+                const changed=mtCommitEbookCompletion(slot,word);
+                const st=mtGetTypedState(slot);
+                const key=mtNormalizeCompletionKey(word,originalIndex);
+                const counts=mtGetSuccessCountsObject(st);
+                if(Math.max(0,Number(counts[key]||0))===0) counts[key]=1;
+                st.successCounts=counts;
+                mtSaveTypedState(slot,st);
+                if(changed) newlyPassed++;
+            });
+        } else {
+            const st=mtGetTypedState(slot);
+            const indexSet=mtGetCompletionIndexes(st);
+            const keySet=mtGetCompletionKeys(st);
+            const history=mtGetCompletionHistoryObject(st);
+            const counts=mtGetSuccessCountsObject(st);
+            const completedAt=new Date().toISOString();
+
+            selected.forEach(({displayIndex,word})=>{
+                const originalIndex=Number.isInteger(Number(word.originalIndex)) ? Number(word.originalIndex) : displayIndex;
+                const key=mtNormalizeCompletionKey(word,originalIndex);
+                const alreadyDone=indexSet.has(originalIndex) || keySet.has(key) || Math.max(0,Number(counts[key]||0))>0;
+                indexSet.add(originalIndex);
+                keySet.add(key);
+                history[key]=history[key] || {originalIndex,completedAt};
+                if(Math.max(0,Number(counts[key]||0))===0) counts[key]=1;
+                if(!alreadyDone) newlyPassed++;
+            });
+
+            st.completedCardIndexes=Array.from(indexSet).sort((a,b)=>a-b);
+            st.completedMaskKeys=Array.from(keySet);
+            st.completedMaskHistory=history;
+            st.successCounts=counts;
+            st.lastSession=null;
+            st.lastError='';
+            mtSaveTypedState(slot,st);
+        }
+
+        if(newlyPassed>0) mtRecordDailyStat('cards',newlyPassed);
+        mtEbookSelectedIndexes.clear();
+        mtOpenEbookViewer(slot,true);
+        mtInitSlots();
+    }
     function mtEbookDeleteSelected(slotIndex){
         const slot=Number(slotIndex);
         const type=mtGetSlotType(slot);
@@ -8942,6 +9003,8 @@ ${JSON.stringify(finalPayload)}`;
         if(selectPageBtn) selectPageBtn.onclick=(e)=>{ e.preventDefault(); e.stopPropagation(); mtEbookTogglePageSelection(Number(slotIndex), pageWords, start); };
         const deleteSelectedBtn=document.getElementById('mtEbookDeleteSelectedBtn');
         if(deleteSelectedBtn) deleteSelectedBtn.onclick=(e)=>{ e.preventDefault(); e.stopPropagation(); mtEbookDeleteSelected(Number(slotIndex)); };
+        const passSelectedBtn=document.getElementById('mtEbookPassSelectedBtn');
+        if(passSelectedBtn) passSelectedBtn.onclick=(e)=>{ e.preventDefault(); e.stopPropagation(); mtEbookPassSelected(Number(slotIndex)); };
         const pg=document.getElementById('mtEbookPagination');
         if(pg){
             pg.innerHTML='';
